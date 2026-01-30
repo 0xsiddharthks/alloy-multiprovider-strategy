@@ -4,20 +4,21 @@ version = "0.1.0"
 edition = "2021"
 description = "A multi-provider wrapper for alloy with quorum-based consensus and automatic health ranking"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/MystenLabs/alloy-multiprovider-strategy"
+readme = "README.md"
+repository = "https://github.com/0xsiddharthks/alloy-multiprovider-strategy"
 keywords = ["ethereum", "alloy", "provider", "quorum", "multi-provider"]
 categories = ["cryptography::cryptocurrencies", "network-programming"]
 
 [dependencies]
 # Alloy ecosystem
-alloy-provider = { version = "1.1", features = ["reqwest"] }
-alloy-transport = "1.1"
-alloy-transport-http = { version = "1.1", features = ["reqwest"] }
-alloy-rpc-types = "1.1"
-alloy-rpc-client = "1.1"
-alloy-primitives = "1.1"
-alloy-json-rpc = "1.1"
-alloy-network = "1.1"
+alloy-provider = { version = "1.1.3", features = ["reqwest"] }
+alloy-transport = "1.1.3"
+alloy-transport-http = { version = "1.1.3", features = ["reqwest"] }
+alloy-rpc-types = "1.1.3"
+alloy-rpc-client = "1.1.3"
+alloy-primitives = "1"
+alloy-json-rpc = "1.1.3"
+alloy-network = "1.1.3"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
