@@ -71,6 +71,3 @@ pub use transport::QuorumTransport;
 pub use alloy_network::Ethereum;
 pub use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
 pub use alloy_provider::{Provider, RootProvider};
-pub use alloy_rpc_types::{
-    Block, BlockId, BlockNumberOrTag, Filter, Log, Transaction, TransactionReceipt,
-};
