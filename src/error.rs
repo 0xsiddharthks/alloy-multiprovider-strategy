@@ -4,18 +4,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MultiProviderError {
-    #[error("no providers configured")]
-    NoProviders,
-
     #[error("quorum not reached: needed {required} matching responses, got {received} out of {total} providers")]
     QuorumNotReached {
         required: usize,
         received: usize,
         total: usize,
     },
-
-    #[error("all providers failed: {0}")]
-    AllProvidersFailed(String),
 
     #[error("transport error: {0}")]
     Transport(#[from] alloy_transport::TransportError),
@@ -25,15 +19,6 @@ pub enum MultiProviderError {
 
     #[error("failed to initialize provider for {url}: {reason}")]
     InitializationFailed { url: String, reason: String },
-
-    #[error("health check failed: {0}")]
-    HealthCheckFailed(String),
-
-    #[error("request timed out after {0:?}")]
-    Timeout(std::time::Duration),
-
-    #[error("invalid URL: {0}")]
-    InvalidUrl(#[from] url::ParseError),
 }
 
 impl MultiProviderError {
