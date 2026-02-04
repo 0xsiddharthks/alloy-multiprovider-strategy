@@ -2,6 +2,10 @@
 //!
 //! This module provides a custom `Transport` implementation that sends requests
 //! to multiple RPC providers and requires quorum consensus before returning a response.
+//!
+//! When only a single provider is configured (with quorum=1), the transport
+//! operates in a zero-overhead passthrough mode — no quorum checking, no health
+//! recording, no background tasks, no lock contention.
 
 use crate::config::MultiProviderConfig;
 use crate::error::MultiProviderError;
@@ -90,9 +94,24 @@ impl QuorumTransportState {
     }
 }
 
+/// Internal representation: single-provider passthrough vs multi-provider quorum.
+#[derive(Clone)]
+enum TransportMode {
+    /// Single provider — direct passthrough with no quorum, health tracking, or locking overhead.
+    Single {
+        transport: Http<Client>,
+        url: String,
+        timeout: Duration,
+    },
+    /// Multiple providers with quorum consensus and health ranking.
+    Quorum {
+        state: Arc<RwLock<QuorumTransportState>>,
+    },
+}
+
 #[derive(Clone)]
 pub struct QuorumTransport {
-    state: Arc<RwLock<QuorumTransportState>>,
+    mode: TransportMode,
     config: MultiProviderConfig,
     shutdown: Arc<Notify>,
 }
@@ -116,11 +135,24 @@ impl QuorumTransport {
             providers.push(ProviderTransport::new(transport, url_str.clone()));
         }
 
-        let state = Arc::new(RwLock::new(QuorumTransportState::new(providers)));
+        let mode = if providers.len() == 1 && config.quorum == 1 {
+            // Single-provider fast path: no quorum state, no locks, no health tracking.
+            let single = providers.pop().expect("checked len == 1");
+            TransportMode::Single {
+                transport: single.transport,
+                url: single.url,
+                timeout: config.request_timeout,
+            }
+        } else {
+            TransportMode::Quorum {
+                state: Arc::new(RwLock::new(QuorumTransportState::new(providers))),
+            }
+        };
+
         let shutdown = Arc::new(Notify::new());
 
         Ok(Self {
-            state,
+            mode,
             config,
             shutdown,
         })
@@ -131,12 +163,24 @@ impl QuorumTransport {
         Self::new(config)
     }
 
+    /// Run a one-shot health check on all providers.
+    /// No-op in single-provider mode.
     pub async fn run_health_check(&self) {
-        run_health_check_internal(&self.state, &self.config).await;
+        match &self.mode {
+            TransportMode::Single { .. } => { /* no-op: nothing to rank or compare */ }
+            TransportMode::Quorum { state } => {
+                run_health_check_internal(state, &self.config).await;
+            }
+        }
     }
 
+    /// Spawn a background task that periodically health-checks all providers.
+    /// No-op in single-provider mode (no task is spawned).
     pub fn start_health_check_task(&self) {
-        let state = Arc::clone(&self.state);
+        let state = match &self.mode {
+            TransportMode::Single { .. } => return,
+            TransportMode::Quorum { state } => Arc::clone(state),
+        };
         let config = self.config.clone();
         let shutdown = Arc::clone(&self.shutdown);
 
@@ -162,25 +206,38 @@ impl QuorumTransport {
     }
 
     pub fn get_provider_health(&self) -> Vec<(String, HealthStatus)> {
-        let state = self.state.read();
-        state
-            .providers
-            .iter()
-            .map(|p| (p.url.clone(), p.health.status))
-            .collect()
+        match &self.mode {
+            TransportMode::Single { url, .. } => {
+                vec![(url.clone(), HealthStatus::Healthy)]
+            }
+            TransportMode::Quorum { state } => {
+                let s = state.read();
+                s.providers
+                    .iter()
+                    .map(|p| (p.url.clone(), p.health.status))
+                    .collect()
+            }
+        }
     }
 
     pub fn healthy_provider_count(&self) -> usize {
-        let state = self.state.read();
-        state
-            .providers
-            .iter()
-            .filter(|p| p.health.status == HealthStatus::Healthy)
-            .count()
+        match &self.mode {
+            TransportMode::Single { .. } => 1,
+            TransportMode::Quorum { state } => {
+                let s = state.read();
+                s.providers
+                    .iter()
+                    .filter(|p| p.health.status == HealthStatus::Healthy)
+                    .count()
+            }
+        }
     }
 
     pub fn provider_count(&self) -> usize {
-        self.state.read().providers.len()
+        match &self.mode {
+            TransportMode::Single { .. } => 1,
+            TransportMode::Quorum { state } => state.read().providers.len(),
+        }
     }
 
     pub fn quorum(&self) -> usize {
@@ -189,6 +246,12 @@ impl QuorumTransport {
 
     pub fn config(&self) -> &MultiProviderConfig {
         &self.config
+    }
+
+    /// Returns `true` if this transport is operating in single-provider
+    /// passthrough mode (no quorum overhead).
+    pub fn is_single_provider(&self) -> bool {
+        matches!(self.mode, TransportMode::Single { .. })
     }
 }
 
@@ -203,11 +266,34 @@ impl Service<RequestPacket> for QuorumTransport {
     }
 
     fn call(&mut self, req: RequestPacket) -> Self::Future {
-        let state = Arc::clone(&self.state);
-        let quorum = self.config.quorum;
-        let timeout = self.config.request_timeout;
-
-        Box::pin(async move { execute_with_quorum(state, req, quorum, timeout).await })
+        match &self.mode {
+            TransportMode::Single {
+                transport, timeout, ..
+            } => {
+                // Fast path: direct passthrough, no quorum/health overhead.
+                let mut transport = transport.clone();
+                let timeout = *timeout;
+                Box::pin(async move {
+                    tokio::time::timeout(timeout, transport.call(req))
+                        .await
+                        .map_err(|_| {
+                            TransportErrorKind::custom(MultiProviderError::QuorumNotReached {
+                                required: 1,
+                                received: 0,
+                                total: 1,
+                            })
+                        })?
+                })
+            }
+            TransportMode::Quorum { state } => {
+                let state = Arc::clone(state);
+                let quorum = self.config.quorum;
+                let timeout = self.config.request_timeout;
+                Box::pin(
+                    async move { execute_with_quorum(state, req, quorum, timeout).await },
+                )
+            }
+        }
     }
 }
 
